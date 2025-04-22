@@ -1,12 +1,14 @@
 package com.example.certificate_pinning_httpclient_selcom
-import android.provider.Settings
+
 
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
-import com.scottyab.rootbeer.RootBeer //jailbroken
-
+//jailbroken
+import android.content.Context
+import android.provider.Settings
+import com.scottyab.rootbeer.RootBeer
 
 
 import android.os.Handler
@@ -37,7 +39,8 @@ class CertificatePinningHttpclientSelcomPlugin: FlutterPlugin, MethodChannel.Met
       messenger.makeBackgroundTaskQueue()
     )
     channel?.setMethodCallHandler(this)
-    context = binding.applicationContext
+    context = flutterPluginBinding.applicationContext
+
   }
 
  // @SuppressLint("NewApi")
@@ -58,8 +61,8 @@ class CertificatePinningHttpclientSelcomPlugin: FlutterPlugin, MethodChannel.Met
     }
     else if(call.method == "jailbroken") {
       try {
-      val rootBeer = true;//RootBeer(context)
-      result.success(rootBeer.isRooted)
+        val rootBeer = RootBeer(context)
+        result.success(rootBeer.isRooted)
       } catch (e: Exception) {
         result.error("jailbroken", e.localizedMessage, null)
       }
@@ -82,7 +85,7 @@ class CertificatePinningHttpclientSelcomPlugin: FlutterPlugin, MethodChannel.Met
 
 
   private fun isDevMode(): Boolean {
-    return Settings.Secure.getInt(
+      return Settings.Secure.getInt(
       context.contentResolver,
       Settings.Global.DEVELOPMENT_SETTINGS_ENABLED, 0
     ) != 0
