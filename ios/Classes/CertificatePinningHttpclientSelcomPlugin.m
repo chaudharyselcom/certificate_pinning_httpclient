@@ -17,8 +17,11 @@
 * OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
 
-#import "CertificatePinningHttpClientPlugin.h"
-
+#import "CertificatePinningHttpclientSelcomPlugin.h"
+#include <sys/stat.h>
+#include <mach-o/dyld.h>
+#include <dlfcn.h>
+#include <sys/sysctl.h>
 
 // Definition for a special class to fetch host certificates by implementing a NSURLSessionTaskDelegate that
 // is called upon initial connection to get the certificates but the connection is dropped at that point.
@@ -32,7 +35,6 @@
 
 @end
 
-
 // Timeout in seconds for a getting the host certificates
 static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
 
@@ -40,7 +42,7 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
 // MethodChannel to call various methods within the SDK. A facility is also provided to probe the certificates
 // presented on any particular URL to implement the pinning. Note that the MethodChannel must run on a background
 // thread since it makes blocking calls.
-@implementation CertificatePinningHttpClientPlugin
+@implementation CertificatePinningHttpclientSelcomPlugin
 
 + (void)registerWithRegistrar:(NSObject<FlutterPluginRegistrar>*)registrar {
     NSObject<FlutterTaskQueue>* taskQueue = [[registrar messenger] makeBackgroundTaskQueue];
@@ -49,10 +51,131 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
               binaryMessenger: [registrar messenger]
                         codec: [FlutterStandardMethodCodec sharedInstance]
                     taskQueue: taskQueue];
-    CertificatePinningHttpClientPlugin* instance = [[CertificatePinningHttpClientPlugin alloc] init];
+    CertificatePinningHttpclientSelcomPlugin* instance = [[CertificatePinningHttpclientSelcomPlugin alloc] init];
     [registrar addMethodCallDelegate:instance channel:channel];
 }
 
+- (BOOL)isJailbroken {
+    // First check: Cydia app existence
+    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/Applications/Cydia.app"]) {
+        return YES;
+    }
+    
+    // Second check: MobileSubstrate existence
+    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/Library/MobileSubstrate/MobileSubstrate.dylib"]) {
+        return YES;
+    }
+    
+    // Third check: Check if we can write to /private directory (should not be possible on non-jailbroken)
+    NSError *error;
+    NSString *testPath = @"/private/jailbreak.txt";
+    [@"test" writeToFile:testPath atomically:YES encoding:NSUTF8StringEncoding error:&error];
+    if (!error) {
+        [[NSFileManager defaultManager] removeItemAtPath:testPath error:nil];
+        return YES;
+    }
+    
+    // Fourth check: Check for symbolic links in /Applications
+    struct stat s;
+    if (lstat("/Applications", &s) == 0) {
+        if (s.st_mode & S_IFLNK) {
+            return YES;
+        }
+    }
+    
+    // Fifth check: Check for Cydia URL scheme
+    if ([[UIApplication sharedApplication] canOpenURL:[NSURL URLWithString:@"cydia://"]]) {
+        return YES;
+    }
+    
+    // Sixth check: Check for common jailbreak files
+    NSArray *jailbreakFilePaths = @[
+        @"/bin/bash",
+        @"/usr/sbin/sshd",
+        @"/etc/apt",
+        @"/private/var/lib/apt/",
+        @"/private/var/lib/cydia",
+        @"/private/var/stash"
+    ];
+    
+    for (NSString *path in jailbreakFilePaths) {
+        if ([[NSFileManager defaultManager] fileExistsAtPath:path]) {
+            return YES;
+        }
+    }
+    
+    // Seventh check: Check for sandbox violation
+    FILE *f = fopen("/bin/bash", "r");
+    if (f) {
+        fclose(f);
+        return YES;
+    }
+    
+    // Eighth check: Check for environment variables
+    char *env = getenv("DYLD_INSERT_LIBRARIES");
+    if (env != NULL) {
+        return YES;
+    }
+    
+    // Ninth check: Check for dynamic code injection
+    void *handle = dlopen("/usr/lib/libjailbreak.dylib", RTLD_NOW);
+    if (handle) {
+        dlclose(handle);
+        return YES;
+    }
+    
+    // Tenth check: Check for debugger
+    int name[4];
+    name[0] = CTL_KERN;
+    name[1] = KERN_PROC;
+    name[2] = KERN_PROC_PID;
+    name[3] = getpid();
+    
+    struct kinfo_proc info;
+    size_t info_size = sizeof(info);
+    
+    if (sysctl(name, 4, &info, &info_size, NULL, 0) != -1) {
+        if ((info.kp_proc.p_flag & P_TRACED) != 0) {
+            return YES;
+        }
+    }
+    
+    // If none of the checks above returned YES, the device is likely not jailbroken
+    return NO;
+}
+
+- (BOOL)isDeveloperMode {
+    #if TARGET_IPHONE_SIMULATOR
+        return YES;
+    #else
+        // Check for debugger
+        int name[4];
+        name[0] = CTL_KERN;
+        name[1] = KERN_PROC;
+        name[2] = KERN_PROC_PID;
+        name[3] = getpid();
+        
+        struct kinfo_proc info;
+        size_t info_size = sizeof(info);
+        
+        if (sysctl(name, 4, &info, &info_size, NULL, 0) != -1) {
+            if ((info.kp_proc.p_flag & P_TRACED) != 0) {
+                return YES;
+            }
+        }
+        
+        // Check for development provisioning profile
+        NSString *provisionPath = [[NSBundle mainBundle] pathForResource:@"embedded" ofType:@"mobileprovision"];
+        if (provisionPath) {
+            NSString *provisionString = [NSString stringWithContentsOfFile:provisionPath encoding:NSASCIIStringEncoding error:nil];
+            if ([provisionString rangeOfString:@"<key>get-task-allow</key><true/>"].location != NSNotFound) {
+                return YES;
+            }
+        }
+        
+        return NO;
+    #endif
+}
 
 - (void)handleMethodCall:(FlutterMethodCall *)call result:(FlutterResult)result {
     if ([@"fetchHostCertificates" isEqualToString:call.method]) {
@@ -66,6 +189,10 @@ static const NSTimeInterval FETCH_CERTIFICATES_TIMEOUT = 3;
             NSArray<FlutterStandardTypedData *> *hostCerts = [hostCertificatesFetcher fetchCertificates:url];
             result(hostCerts);
         }
+    } else if ([@"jailbroken" isEqualToString:call.method]) {
+        result(@([self isJailbroken]));
+    } else if ([@"developerMode" isEqualToString:call.method]) {
+        result(@([self isDeveloperMode]));
     } else {
         result(FlutterMethodNotImplemented);
     }
